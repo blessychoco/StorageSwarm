@@ -33,6 +33,23 @@
 (define-constant err-file-too-large (err u101))
 (define-constant err-insufficient-fee (err u102))
 (define-constant err-file-exists (err u103))
+(define-constant err-invalid-input (err u104))
+(define-constant err-file-not-found (err u105))
+
+;; Input validation functions
+(define-private (is-valid-file-id (file-id (buff 32)))
+  (and 
+    (> (len file-id) u0)  ;; Non-empty
+    (<= (len file-id) u32)  ;; Max length check
+  )
+)
+
+(define-private (is-valid-encryption-key (key (buff 64)))
+  (and 
+    (> (len key) u0)  ;; Non-empty
+    (<= (len key) u64)  ;; Max length check
+  )
+)
 
 ;; Upload a file to the decentralized storage network
 (define-public (upload-file 
@@ -41,6 +58,10 @@
   (encryption-key (buff 64))
 )
   (begin
+    ;; Validate inputs
+    (asserts! (is-valid-file-id file-id) err-invalid-input)
+    (asserts! (is-valid-encryption-key encryption-key) err-invalid-input)
+    
     ;; Validate file size
     (asserts! (<= file-size max-file-size) err-file-too-large)
     
@@ -75,12 +96,21 @@
 
 ;; Retrieve file metadata (accessible only by file owner)
 (define-read-only (get-file-metadata (file-id (buff 32)))
-  (map-get? storage-files { file-id: file-id, owner: tx-sender })
+  (begin
+    (asserts! (is-valid-file-id file-id) none)
+    (map-get? storage-files { file-id: file-id, owner: tx-sender })
+  )
 )
 
 ;; Register as a storage provider
 (define-public (register-storage-provider)
   (begin
+    ;; Check if provider is already registered
+    (asserts! 
+      (is-none (map-get? storage-providers tx-sender)) 
+      err-unauthorized
+    )
+    
     (map-set storage-providers 
       tx-sender 
       {
@@ -98,18 +128,64 @@
   (provider principal) 
   (file-id (buff 32))
 )
-  (let ((current-provider-stats 
-          (unwrap! 
-            (map-get? storage-providers provider) 
-            err-unauthorized
-          )))
-    (map-set storage-providers 
-      provider
-      (merge current-provider-stats {
-        successful-storage-ops: (+ (get successful-storage-ops current-provider-stats) u1),
-        reputation-score: (+ (get reputation-score current-provider-stats) u10)
-      })
+  (begin
+    ;; Validate inputs
+    (asserts! (is-valid-file-id file-id) err-invalid-input)
+    
+    ;; Check file existence and ownership
+    (let ((file-entry 
+            (map-get? storage-files { file-id: file-id, owner: tx-sender })))
+      ;; Ensure file exists
+      (asserts! (is-some file-entry) err-file-not-found)
+      
+      ;; Ensure the caller is authorized (could be contract owner or file owner)
+      (asserts! 
+        (or 
+          (is-eq tx-sender contract-owner)
+          (is-eq tx-sender contract-owner)
+        ) 
+        err-unauthorized
+      )
     )
+    
+    ;; Get current provider stats
+    (let ((current-provider-stats 
+            (unwrap! 
+              (map-get? storage-providers provider) 
+              err-unauthorized
+            )))
+      (map-set storage-providers 
+        provider
+        (merge current-provider-stats {
+          successful-storage-ops: (+ (get successful-storage-ops current-provider-stats) u1),
+          reputation-score: (+ (get reputation-score current-provider-stats) u10)
+        })
+      )
+      (ok true)
+    )
+  )
+)
+
+;; Bonus: Function to check provider reputation
+(define-read-only (get-provider-reputation (provider principal))
+  (map-get? storage-providers provider)
+)
+
+;; Optional: File deletion function
+(define-public (delete-file (file-id (buff 32)))
+  (begin
+    ;; Validate file ID
+    (asserts! (is-valid-file-id file-id) err-invalid-input)
+    
+    ;; Ensure file exists and is owned by sender
+    (asserts! 
+      (is-some (map-get? storage-files { file-id: file-id, owner: tx-sender })) 
+      err-unauthorized
+    )
+    
+    ;; Remove file metadata
+    (map-delete storage-files { file-id: file-id, owner: tx-sender })
+    
     (ok true)
   )
 )
