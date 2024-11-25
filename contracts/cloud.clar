@@ -1,30 +1,115 @@
+;; StorageSwarm: Decentralized Encrypted Cloud Storage Contract
 
-;; title: cloud
-;; version:
-;; summary:
-;; description:
+(define-constant contract-owner tx-sender)
+(define-constant storage-fee u1000) ;; Satoshis per storage unit
+(define-constant max-file-size u104857600) ;; 100 MB max file size
 
-;; traits
-;;
+;; Storage file metadata structure
+(define-map storage-files 
+  { 
+    file-id: (buff 32),  ;; Unique file identifier (SHA-256 hash)
+    owner: principal 
+  }
+  {
+    file-size: uint,
+    encryption-key: (buff 64),
+    stored-timestamp: uint,
+    total-replicas: uint
+  }
+)
 
-;; token definitions
-;;
+;; Mapping to track storage providers and their reputation
+(define-map storage-providers 
+  principal 
+  {
+    total-storage: uint,
+    successful-storage-ops: uint,
+    reputation-score: uint
+  }
+)
 
-;; constants
-;;
+;; Error constants
+(define-constant err-unauthorized (err u100))
+(define-constant err-file-too-large (err u101))
+(define-constant err-insufficient-fee (err u102))
+(define-constant err-file-exists (err u103))
 
-;; data vars
-;;
+;; Upload a file to the decentralized storage network
+(define-public (upload-file 
+  (file-id (buff 32)) 
+  (file-size uint) 
+  (encryption-key (buff 64))
+)
+  (begin
+    ;; Validate file size
+    (asserts! (<= file-size max-file-size) err-file-too-large)
+    
+    ;; Check if file already exists
+    (asserts! 
+      (is-none (map-get? storage-files { file-id: file-id, owner: tx-sender })) 
+      err-file-exists
+    )
+    
+    ;; Calculate storage fee
+    (let ((required-fee (* file-size storage-fee)))
+      (asserts! (>= (stx-get-balance tx-sender) required-fee) err-insufficient-fee)
+      
+      ;; Transfer storage fee
+      (try! (stx-transfer? required-fee tx-sender contract-owner))
+      
+      ;; Store file metadata
+      (map-set storage-files 
+        { file-id: file-id, owner: tx-sender }
+        {
+          file-size: file-size,
+          encryption-key: encryption-key,
+          stored-timestamp: block-height,
+          total-replicas: u1
+        }
+      )
+      
+      (ok true)
+    )
+  )
+)
 
-;; data maps
-;;
+;; Retrieve file metadata (accessible only by file owner)
+(define-read-only (get-file-metadata (file-id (buff 32)))
+  (map-get? storage-files { file-id: file-id, owner: tx-sender })
+)
 
-;; public functions
-;;
+;; Register as a storage provider
+(define-public (register-storage-provider)
+  (begin
+    (map-set storage-providers 
+      tx-sender 
+      {
+        total-storage: u0,
+        successful-storage-ops: u0,
+        reputation-score: u100 ;; Initial reputation
+      }
+    )
+    (ok true)
+  )
+)
 
-;; read only functions
-;;
-
-;; private functions
-;;
-
+;; Reward mechanism for storage providers
+(define-public (reward-storage-provider 
+  (provider principal) 
+  (file-id (buff 32))
+)
+  (let ((current-provider-stats 
+          (unwrap! 
+            (map-get? storage-providers provider) 
+            err-unauthorized
+          )))
+    (map-set storage-providers 
+      provider
+      (merge current-provider-stats {
+        successful-storage-ops: (+ (get successful-storage-ops current-provider-stats) u1),
+        reputation-score: (+ (get reputation-score current-provider-stats) u10)
+      })
+    )
+    (ok true)
+  )
+)
