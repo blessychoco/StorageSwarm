@@ -3,6 +3,8 @@
 (define-constant contract-owner tx-sender)
 (define-constant storage-fee u1000) ;; Satoshis per storage unit
 (define-constant max-file-size u104857600) ;; 100 MB max file size
+(define-constant initial-reputation u100)
+(define-constant reward-increment u10)
 
 ;; Storage file metadata structure
 (define-map storage-files 
@@ -35,6 +37,7 @@
 (define-constant err-file-exists (err u103))
 (define-constant err-invalid-input (err u104))
 (define-constant err-file-not-found (err u105))
+(define-constant err-provider-not-registered (err u106))
 
 ;; Input validation functions
 (define-private (is-valid-file-id (file-id (buff 32)))
@@ -49,6 +52,11 @@
     (> (len key) u0)  ;; Non-empty
     (<= (len key) u64)  ;; Max length check
   )
+)
+
+;; Check if a storage provider is registered
+(define-private (is-registered-provider (provider principal))
+  (is-some (map-get? storage-providers provider))
 )
 
 ;; Upload a file to the decentralized storage network
@@ -116,7 +124,7 @@
       {
         total-storage: u0,
         successful-storage-ops: u0,
-        reputation-score: u100 ;; Initial reputation
+        reputation-score: initial-reputation
       }
     )
     (ok true)
@@ -131,6 +139,9 @@
   (begin
     ;; Validate inputs
     (asserts! (is-valid-file-id file-id) err-invalid-input)
+    
+    ;; Ensure provider is registered
+    (asserts! (is-registered-provider provider) err-provider-not-registered)
     
     ;; Check file existence and ownership
     (let ((file-entry 
@@ -148,17 +159,17 @@
       )
     )
     
-    ;; Get current provider stats
+    ;; Get current provider stats with additional safety checks
     (let ((current-provider-stats 
             (unwrap! 
               (map-get? storage-providers provider) 
-              err-unauthorized
+              err-provider-not-registered
             )))
       (map-set storage-providers 
         provider
         (merge current-provider-stats {
           successful-storage-ops: (+ (get successful-storage-ops current-provider-stats) u1),
-          reputation-score: (+ (get reputation-score current-provider-stats) u10)
+          reputation-score: (+ (get reputation-score current-provider-stats) reward-increment)
         })
       )
       (ok true)
