@@ -80,6 +80,11 @@
   )
 )
 
+;; Helper function to validate provider
+(define-private (is-valid-provider (provider principal))
+  (is-some (map-get? storage-providers provider))
+)
+
 ;; Enhanced provider registration with stake requirement
 (define-public (register-storage-provider (initial-stake uint))
   (begin
@@ -118,6 +123,7 @@
   (begin
     ;; Validate inputs
     (asserts! (is-valid-file-id file-id) ERR-INVALID-INPUT)
+    (asserts! (is-valid-provider provider) ERR-PROVIDER-NOT-REGISTERED)
     
     ;; Ensure provider is registered
     (let ((current-provider-stats 
@@ -154,7 +160,6 @@
   )
 )
 
-
 ;; Enhanced file retrieval with provider verification
 (define-read-only (get-file-metadata (file-id (buff 32)))
   (begin
@@ -163,7 +168,7 @@
   )
 )
 
-;; Provider stake withdrawal with reputation-based restrictions
+;; Provider stake withdrawal with reputation-based restrictions and amount validation
 (define-public (withdraw-provider-stake (amount uint))
   (let ((provider tx-sender)
         (provider-stats (unwrap! 
@@ -176,6 +181,9 @@
       ERR-INSUFFICIENT-REPUTATION
     )
     
+    ;; Ensure the withdrawal amount is valid (greater than 0 and less than or equal to the provider's total stake)
+    (asserts! (and (> amount u0) (<= amount (get total-storage provider-stats))) ERR-INVALID-INPUT)
+    
     ;; Transfer stake back to provider
     (as-contract (stx-transfer? amount (as-contract tx-sender) provider))
   )
@@ -183,5 +191,8 @@
 
 ;; Bonus: Comprehensive provider reputation check
 (define-read-only (get-provider-full-stats (provider principal))
-  (map-get? storage-providers provider)
+  (begin
+    (asserts! (is-valid-provider provider) none)
+    (map-get? storage-providers provider)
+  )
 )
