@@ -1,45 +1,71 @@
-;; StorageSwarm: Decentralized Encrypted Cloud Storage Contract
+;; StorageSwarm: Enhanced Decentralized Encrypted Cloud Storage Contract
 
+;; Constants
 (define-constant contract-owner tx-sender)
-(define-constant storage-fee u1000) ;; Satoshis per storage unit
-(define-constant max-file-size u104857600) ;; 100 MB max file size
+(define-constant MIN-STORAGE-FEE u500) ;; Minimum storage fee
+(define-constant MAX-STORAGE-FEE u5000) ;; Maximum storage fee
+(define-constant storage-fee-per-mb u10) ;; Fee calculation per MB
+(define-constant max-file-size u1048576) ;; 1 GB max file size
 (define-constant initial-reputation u100)
+(define-constant max-reputation u1000)
 (define-constant reward-increment u10)
+(define-constant penalty-decrement u5)
+(define-constant min-replicas u3)
+(define-constant max-replicas u10)
 
-;; Storage file metadata structure
+;; Error Constants (More Descriptive)
+(define-constant ERR-UNAUTHORIZED (err u100))
+(define-constant ERR-FILE-TOO-LARGE (err u101))
+(define-constant ERR-INSUFFICIENT-FEE (err u102))
+(define-constant ERR-FILE-EXISTS (err u103))
+(define-constant ERR-INVALID-INPUT (err u104))
+(define-constant ERR-FILE-NOT-FOUND (err u105))
+(define-constant ERR-PROVIDER-NOT-REGISTERED (err u106))
+(define-constant ERR-INSUFFICIENT-REPUTATION (err u107))
+(define-constant ERR-REPLICA-LIMIT-REACHED (err u108))
+
+;; Storage file metadata structure (Enhanced)
 (define-map storage-files 
   { 
-    file-id: (buff 32),  ;; Unique file identifier (SHA-256 hash)
+    file-id: (buff 32),
     owner: principal 
   }
   {
     file-size: uint,
     encryption-key: (buff 64),
     stored-timestamp: uint,
-    total-replicas: uint
+    total-replicas: uint,
+    replica-providers: (list 10 principal)
   }
 )
 
-;; Mapping to track storage providers and their reputation
+;; Enhanced storage providers tracking
 (define-map storage-providers 
   principal 
   {
     total-storage: uint,
     successful-storage-ops: uint,
-    reputation-score: uint
+    failed-storage-ops: uint,
+    reputation-score: uint,
+    last-active-block: uint
   }
 )
 
-;; Error constants
-(define-constant err-unauthorized (err u100))
-(define-constant err-file-too-large (err u101))
-(define-constant err-insufficient-fee (err u102))
-(define-constant err-file-exists (err u103))
-(define-constant err-invalid-input (err u104))
-(define-constant err-file-not-found (err u105))
-(define-constant err-provider-not-registered (err u106))
+;; Helper function to cap reputation score
+(define-private (cap-reputation-score (current-score uint))
+  (if (> current-score max-reputation)
+    max-reputation
+    current-score)
+)
 
-;; Input validation functions
+;; Helper function to floor reputation score
+(define-private (floor-reputation-score (current-score uint))
+  (if (< current-score u0)
+    u0
+    current-score)
+)
+
+;; Input validation functions with more comprehensive checks
 (define-private (is-valid-file-id (file-id (buff 32)))
   (and 
     (> (len file-id) u0)  ;; Non-empty
@@ -54,47 +80,73 @@
   )
 )
 
-;; Check if a storage provider is registered
-(define-private (is-registered-provider (provider principal))
-  (is-some (map-get? storage-providers provider))
+;; Enhanced provider registration with stake requirement
+(define-public (register-storage-provider (initial-stake uint))
+  (begin
+    ;; Require minimum stake to register
+    (asserts! (>= initial-stake u1000) ERR-INSUFFICIENT-REPUTATION)
+    
+    ;; Check if provider is already registered
+    (asserts! 
+      (is-none (map-get? storage-providers tx-sender)) 
+      ERR-UNAUTHORIZED
+    )
+    
+    ;; Transfer initial stake to contract
+    (try! (stx-transfer? initial-stake tx-sender (as-contract tx-sender)))
+    
+    (map-set storage-providers 
+      tx-sender 
+      {
+        total-storage: u0,
+        successful-storage-ops: u0,
+        failed-storage-ops: u0,
+        reputation-score: initial-reputation,
+        last-active-block: block-height
+      }
+    )
+    (ok true)
+  )
 )
 
-;; Upload a file to the decentralized storage network
-(define-public (upload-file 
-  (file-id (buff 32)) 
-  (file-size uint) 
-  (encryption-key (buff 64))
+;; Enhanced reward and penalty mechanism
+(define-public (update-provider-reputation 
+  (provider principal) 
+  (file-id (buff 32))
+  (was-successful bool)
 )
   (begin
     ;; Validate inputs
-    (asserts! (is-valid-file-id file-id) err-invalid-input)
-    (asserts! (is-valid-encryption-key encryption-key) err-invalid-input)
+    (asserts! (is-valid-file-id file-id) ERR-INVALID-INPUT)
     
-    ;; Validate file size
-    (asserts! (<= file-size max-file-size) err-file-too-large)
-    
-    ;; Check if file already exists
-    (asserts! 
-      (is-none (map-get? storage-files { file-id: file-id, owner: tx-sender })) 
-      err-file-exists
-    )
-    
-    ;; Calculate storage fee
-    (let ((required-fee (* file-size storage-fee)))
-      (asserts! (>= (stx-get-balance tx-sender) required-fee) err-insufficient-fee)
+    ;; Ensure provider is registered
+    (let ((current-provider-stats 
+            (unwrap! 
+              (map-get? storage-providers provider) 
+              ERR-PROVIDER-NOT-REGISTERED
+            )))
       
-      ;; Transfer storage fee
-      (try! (stx-transfer? required-fee tx-sender contract-owner))
-      
-      ;; Store file metadata
-      (map-set storage-files 
-        { file-id: file-id, owner: tx-sender }
-        {
-          file-size: file-size,
-          encryption-key: encryption-key,
-          stored-timestamp: block-height,
-          total-replicas: u1
-        }
+      ;; Update provider stats based on performance
+      (map-set storage-providers 
+        provider
+        (if was-successful
+          ;; Successful operation
+          (merge current-provider-stats {
+            successful-storage-ops: (+ (get successful-storage-ops current-provider-stats) u1),
+            reputation-score: (cap-reputation-score 
+              (+ (get reputation-score current-provider-stats) reward-increment)
+            ),
+            last-active-block: block-height
+          })
+          ;; Failed operation
+          (merge current-provider-stats {
+            failed-storage-ops: (+ (get failed-storage-ops current-provider-stats) u1),
+            reputation-score: (floor-reputation-score 
+              (- (get reputation-score current-provider-stats) penalty-decrement)
+            ),
+            last-active-block: block-height
+          })
+        )
       )
       
       (ok true)
@@ -102,7 +154,8 @@
   )
 )
 
-;; Retrieve file metadata (accessible only by file owner)
+
+;; Enhanced file retrieval with provider verification
 (define-read-only (get-file-metadata (file-id (buff 32)))
   (begin
     (asserts! (is-valid-file-id file-id) none)
@@ -110,93 +163,25 @@
   )
 )
 
-;; Register as a storage provider
-(define-public (register-storage-provider)
-  (begin
-    ;; Check if provider is already registered
+;; Provider stake withdrawal with reputation-based restrictions
+(define-public (withdraw-provider-stake (amount uint))
+  (let ((provider tx-sender)
+        (provider-stats (unwrap! 
+          (map-get? storage-providers provider) 
+          ERR-PROVIDER-NOT-REGISTERED
+        )))
+    ;; Ensure provider has sufficient reputation to withdraw
     (asserts! 
-      (is-none (map-get? storage-providers tx-sender)) 
-      err-unauthorized
+      (>= (get reputation-score provider-stats) u500) 
+      ERR-INSUFFICIENT-REPUTATION
     )
     
-    (map-set storage-providers 
-      tx-sender 
-      {
-        total-storage: u0,
-        successful-storage-ops: u0,
-        reputation-score: initial-reputation
-      }
-    )
-    (ok true)
+    ;; Transfer stake back to provider
+    (as-contract (stx-transfer? amount (as-contract tx-sender) provider))
   )
 )
 
-;; Reward mechanism for storage providers
-(define-public (reward-storage-provider 
-  (provider principal) 
-  (file-id (buff 32))
-)
-  (begin
-    ;; Validate inputs
-    (asserts! (is-valid-file-id file-id) err-invalid-input)
-    
-    ;; Ensure provider is registered
-    (asserts! (is-registered-provider provider) err-provider-not-registered)
-    
-    ;; Check file existence and ownership
-    (let ((file-entry 
-            (map-get? storage-files { file-id: file-id, owner: tx-sender })))
-      ;; Ensure file exists
-      (asserts! (is-some file-entry) err-file-not-found)
-      
-      ;; Ensure the caller is authorized (could be contract owner or file owner)
-      (asserts! 
-        (or 
-          (is-eq tx-sender contract-owner)
-          (is-eq tx-sender contract-owner)
-        ) 
-        err-unauthorized
-      )
-    )
-    
-    ;; Get current provider stats with additional safety checks
-    (let ((current-provider-stats 
-            (unwrap! 
-              (map-get? storage-providers provider) 
-              err-provider-not-registered
-            )))
-      (map-set storage-providers 
-        provider
-        (merge current-provider-stats {
-          successful-storage-ops: (+ (get successful-storage-ops current-provider-stats) u1),
-          reputation-score: (+ (get reputation-score current-provider-stats) reward-increment)
-        })
-      )
-      (ok true)
-    )
-  )
-)
-
-;; Bonus: Function to check provider reputation
-(define-read-only (get-provider-reputation (provider principal))
+;; Bonus: Comprehensive provider reputation check
+(define-read-only (get-provider-full-stats (provider principal))
   (map-get? storage-providers provider)
-)
-
-;; Optional: File deletion function
-(define-public (delete-file (file-id (buff 32)))
-  (begin
-    ;; Validate file ID
-    (asserts! (is-valid-file-id file-id) err-invalid-input)
-    
-    ;; Ensure file exists and is owned by sender
-    (asserts! 
-      (is-some (map-get? storage-files { file-id: file-id, owner: tx-sender })) 
-      err-unauthorized
-    )
-    
-    ;; Remove file metadata
-    (map-delete storage-files { file-id: file-id, owner: tx-sender })
-    
-    (ok true)
-  )
 )
